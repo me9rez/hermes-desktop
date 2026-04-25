@@ -34,16 +34,23 @@
   const btnBackToProvider = document.getElementById("btnBackToProvider");
   const btnFinish = document.getElementById("btnFinish");
   const btnToggleKey = document.getElementById("btnToggleKey");
+  const step1Error = document.getElementById("step1Error");
 
   // ── 国际化 ──
 
-  const lang = new URLSearchParams(window.location.search).get("lang") || "en";
+  const query = new URLSearchParams(window.location.search);
+  const lang = query.get("lang") || "en";
+  const setupMode = query.get("mode") || "normal";
+  const isRepairMode = setupMode === "repair";
 
   const I18N = {
     zh: {
       "welcome.title": "欢迎使用 Hermes Desktop",
       "welcome.subtitle": "Nous Research 出品的一键 AI 助手。让我们开始配置。",
       "welcome.start": "开始配置",
+      "repair.title": "修复运行时环境",
+      "repair.subtitle": "检测到 Python/venv 缺失，点击下方按钮自动修复。",
+      "repair.start": "修复并启动",
       "provider.title": "选择 AI 服务商",
       "provider.subtitle": "选择你要使用的大模型提供商。",
       "provider.ollama.desc": "本地模型",
@@ -78,8 +85,12 @@
     steps.forEach((s, i) => {
       s.classList.toggle("active", i === n - 1);
     });
-    const totalSteps = 4;
-    progressFill.style.width = `${((n - 1) / (totalSteps - 1)) * 100}%`;
+    if (isRepairMode) {
+      progressFill.style.width = n === 4 ? "100%" : "0%";
+    } else {
+      const totalSteps = 4;
+      progressFill.style.width = `${((n - 1) / (totalSteps - 1)) * 100}%`;
+    }
   }
 
   // ── 表单验证 ──
@@ -187,7 +198,33 @@
 
   // ── 按钮事件 ──
 
-  btnStart.addEventListener("click", () => goToStep(2));
+  btnStart.addEventListener("click", async () => {
+    if (!isRepairMode) {
+      goToStep(2);
+      return;
+    }
+
+    btnStart.disabled = true;
+    btnStart.textContent = lang === "zh" ? "修复中..." : "Repairing...";
+    step1Error.style.display = "none";
+
+    try {
+      const result = await window.electronAPI.invoke("setup:repair-runtime");
+      if (result.success) {
+        goToStep(4);
+      } else {
+        step1Error.textContent = result.error || "Runtime repair failed";
+        step1Error.style.display = "block";
+        btnStart.disabled = false;
+        btnStart.textContent = t("repair.start") || "Repair and Start";
+      }
+    } catch (err) {
+      step1Error.textContent = err.message || "Runtime repair failed";
+      step1Error.style.display = "block";
+      btnStart.disabled = false;
+      btnStart.textContent = t("repair.start") || "Repair and Start";
+    }
+  });
   btnBackToProvider.addEventListener("click", () => goToStep(2));
 
   btnFinish.addEventListener("click", async () => {
@@ -238,5 +275,22 @@
   // ── 初始化 ──
 
   applyI18n();
+
+  if (isRepairMode) {
+    const step1Title = document.querySelector("#step1 h1");
+    const step1Subtitle = document.querySelector("#step1 .subtitle");
+    if (step1Title) {
+      step1Title.textContent = t("repair.title") || "Repair Runtime Environment";
+    }
+    if (step1Subtitle) {
+      step1Subtitle.textContent = t("repair.subtitle")
+        || "Python/venv is missing. Click below to repair automatically.";
+    }
+    btnStart.textContent = t("repair.start") || "Repair and Start";
+
+    document.getElementById("step2").style.display = "none";
+    document.getElementById("step3").style.display = "none";
+  }
+
   goToStep(1);
 })();

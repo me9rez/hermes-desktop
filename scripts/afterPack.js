@@ -2,8 +2,7 @@
  * afterPack.js — electron-builder afterPack 钩子
  *
  * 将 resources/targets/<platform-arch>/ 下的资源注入到 app bundle 中：
- *   - python/   (standalone Python 3.11)
- *   - venv/     (hermes-agent + hermes-webui + 依赖)
+ *   - python.zip / venv.zip (setup 时解压到 userData/runtime)
  *   - runtime/  (Node.js 22, 用于 browser tools)
  *   - tools/    (ripgrep)
  *   - webui/    (hermes-webui server.py + api/ + static/)
@@ -50,6 +49,12 @@ function copyDirSync(src, dest) {
   }
 }
 
+function copyFileSync(src, dest) {
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.copyFileSync(src, dest);
+  fs.chmodSync(dest, fs.statSync(src).mode);
+}
+
 // ── 入口 ──
 
 exports.default = async function afterPack(context) {
@@ -73,8 +78,8 @@ exports.default = async function afterPack(context) {
   }
   console.log(`[afterPack] 使用目标资源: ${targetId}`);
 
-  // 注入各资源目录
-  const dirs = ["python", "venv", "runtime", "tools", "webui"];
+  // 注入目录资源
+  const dirs = ["runtime", "tools", "webui"];
   for (const dir of dirs) {
     const src = path.join(sourceBase, dir);
     if (!fs.existsSync(src)) {
@@ -84,6 +89,17 @@ exports.default = async function afterPack(context) {
     const dest = path.join(targetBase, dir);
     copyDirSync(src, dest);
     console.log(`[afterPack] 已注入 ${dir}/ → ${path.relative(appOutDir, dest)}`);
+  }
+
+  // 注入运行时压缩包（setup 时再解压）
+  for (const file of ["python.zip", "venv.zip"]) {
+    const src = path.join(sourceBase, file);
+    if (!fs.existsSync(src)) {
+      throw new Error(`[afterPack] 未找到运行时归档: ${src}`);
+    }
+    const dest = path.join(targetBase, file);
+    copyFileSync(src, dest);
+    console.log(`[afterPack] 已注入 ${file} → ${path.relative(appOutDir, dest)}`);
   }
 
   // macOS: 用 Electron Helper 代替独立 Node.js 二进制（节省 ~45MB）

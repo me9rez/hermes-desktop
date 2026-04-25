@@ -3,13 +3,16 @@
  * package-resources.js — Hermes Desktop 资源打包脚本
  *
  * 下载并准备所有运行时依赖：
- *   1. Standalone Python 3.11 (python-build-standalone)
+ *   1. Standalone Python 3.14.4 (python-build-standalone)
  *   2. 创建 venv 并安装 hermes-agent + hermes-webui 依赖
- *   3. Node.js 22 (用于 browser tools)
+ *   3. Node.js 24.15.0 (用于 browser tools + webui server)
  *   4. ripgrep 二进制
- *   5. 复制 hermes-webui 源码
+ *   5. 构建并复制 hermes-web-ui 产物（server/client + node-pty）
  *
- * 用法: node scripts/package-resources.js [--platform darwin|win32] [--arch arm64|x64]
+ * 用法:
+ *   node scripts/package-resources.js [--platform darwin|win32] [--arch arm64|x64]
+ *   node scripts/package-resources.js --only webui [--platform darwin|win32] [--arch arm64|x64]
+ *   node scripts/package-resources.js --only webui-copy [--platform darwin|win32] [--arch arm64|x64]
  */
 
 "use strict";
@@ -17,14 +20,13 @@
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
-const https = require("https");
-const http = require("http");
+const axios = require("axios");
 
 // ── 版本配置 ──
 
-const PYTHON_VERSION = "3.11.15";
+const PYTHON_VERSION = "3.14.4";
 const PYTHON_STANDALONE_TAG = "20260414";
-const NODE_VERSION = "22.14.0";
+const NODE_VERSION = "24.15.0";
 const RIPGREP_VERSION = "14.1.1";
 
 // ── 参数解析 ──
@@ -37,6 +39,7 @@ function getArg(name) {
 
 const targetPlatform = getArg("platform") || process.platform;
 const targetArch = getArg("arch") || process.arch;
+const onlyStep = getArg("only") || "";
 const targetId = `${targetPlatform}-${targetArch}`;
 
 console.log(`\n[package-resources] 目标: ${targetId}\n`);
@@ -73,42 +76,57 @@ function writeStamp(name, version) {
 }
 
 function download(url, destPath) {
-  return new Promise((resolve, reject) => {
-    console.log(`  下载: ${url}`);
+  const MAX_RETRIES = 3;
+  const proxy = {
+    protocol: "http",
+    host: "127.0.0.1",
+    port: 7890,
+  };
+
+  async function run(attempt = 1) {
+    console.log(`  下载: ${url} (attempt ${attempt}/${MAX_RETRIES})`);
     const file = fs.createWriteStream(destPath);
-    const get = url.startsWith("https") ? https.get : http.get;
-    get(url, { headers: { "User-Agent": "hermes-desktop" } }, (res) => {
-      if (res.statusCode === 302 || res.statusCode === 301) {
-        file.close();
-        try { fs.unlinkSync(destPath); } catch {}
-        return download(res.headers.location, destPath).then(resolve, reject);
-      }
-      if (res.statusCode !== 200) {
-        file.close();
-        try { fs.unlinkSync(destPath); } catch {}
-        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-      }
+    try {
+      const res = await axios({
+        method: "get",
+        url,
+        responseType: "stream",
+        timeout: 300000,
+        maxRedirects: 10,
+        proxy,
+        headers: { "User-Agent": "hermes-desktop" },
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+
       const total = parseInt(res.headers["content-length"] || "0", 10);
       let downloaded = 0;
-      res.on("data", (chunk) => {
+      res.data.on("data", (chunk) => {
         downloaded += chunk.length;
         if (total > 0) {
           const pct = ((downloaded / total) * 100).toFixed(0);
           process.stdout.write(`\r  进度: ${pct}% (${(downloaded / 1048576).toFixed(1)} MB)`);
         }
       });
-      res.pipe(file);
-      file.on("finish", () => {
-        file.close();
-        process.stdout.write("\n");
-        resolve();
+
+      await new Promise((resolve, reject) => {
+        res.data.pipe(file);
+        file.on("finish", resolve);
+        file.on("error", reject);
+        res.data.on("error", reject);
       });
-    }).on("error", (err) => {
+      process.stdout.write("\n");
+    } catch (err) {
       file.close();
       try { fs.unlinkSync(destPath); } catch {}
-      reject(err);
-    });
-  });
+      if (attempt < MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, 2000));
+        return run(attempt + 1);
+      }
+      throw err;
+    }
+  }
+
+  return run();
 }
 
 function exec(cmd, opts = {}) {
@@ -135,6 +153,67 @@ function copyDirSync(src, dest) {
       fs.copyFileSync(s, d);
     }
   }
+}
+
+function getDirSizeBytes(dir) {
+  let total = 0;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    const p = path.join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) {
+        total += getDirSizeBytes(p);
+      } else if (entry.isFile()) {
+        total += fs.statSync(p).size;
+      } else if (entry.isSymbolicLink()) {
+        const real = fs.realpathSync(p);
+        total += fs.statSync(real).size;
+      }
+    } catch {}
+  }
+  return total;
+}
+
+function formatBytes(n) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function createRuntimeZips() {
+  const pythonDir = path.join(TARGET_DIR, "python");
+  const venvDir = path.join(TARGET_DIR, "venv");
+  const pythonZip = path.join(TARGET_DIR, "python.zip");
+  const venvZip = path.join(TARGET_DIR, "venv.zip");
+
+  if (!fs.existsSync(pythonDir)) {
+    throw new Error(`无法压缩：目录不存在 ${pythonDir}`);
+  }
+  if (!fs.existsSync(venvDir)) {
+    throw new Error(`无法压缩：目录不存在 ${venvDir}`);
+  }
+
+  console.log(`[2.5/5] 压缩 python/venv 为 zip...`);
+
+  try { fs.unlinkSync(pythonZip); } catch {}
+  try { fs.unlinkSync(venvZip); } catch {}
+
+  // 使用 tar 生成 zip，归档内保留顶层目录名 python/ 与 venv/
+  exec(`tar -a -cf "${pythonZip}" -C "${TARGET_DIR}" "python"`, { stdio: "pipe" });
+  exec(`tar -a -cf "${venvZip}" -C "${TARGET_DIR}" "venv"`, { stdio: "pipe" });
+
+  console.log(`  已生成: ${pythonZip}`);
+  console.log(`  已生成: ${venvZip}\n`);
 }
 
 // ── Step 1: Python 3.11 ──
@@ -187,7 +266,7 @@ async function createVenv() {
   const venvDir = path.join(TARGET_DIR, "venv");
   const pythonBin = targetPlatform === "win32"
     ? path.join(TARGET_DIR, "python", "python.exe")
-    : path.join(TARGET_DIR, "python", "bin", "python3.11");
+    : path.join(TARGET_DIR, "python", "bin", "python3.13");
 
   if (!fs.existsSync(HERMES_AGENT_DIR)) {
     throw new Error(
@@ -205,7 +284,7 @@ async function createVenv() {
 
   const venvPythonBin = targetPlatform === "win32"
     ? path.join(venvDir, "Scripts", "python.exe")
-    : path.join(venvDir, "bin", "python3.11");
+    : path.join(venvDir, "bin", "python3.13");
 
   exec(`"${venvPythonBin}" -m pip install --upgrade pip`, { stdio: "pipe" });
   // 不用 -e（editable），确保代码实际复制到 site-packages，便于在其他机器上运行
@@ -216,7 +295,7 @@ async function createVenv() {
   console.log(`  venv 创建完成\n`);
 }
 
-// ── Step 3: Node.js 22 ──
+// ── Step 3: Node.js 24 ──
 
 async function installNodejs() {
   const runtimeDir = path.join(TARGET_DIR, "runtime");
@@ -357,42 +436,65 @@ async function installRipgrep() {
   console.log(`  ripgrep ${RIPGREP_VERSION} 安装完成\n`);
 }
 
-// ── Step 5: 复制 hermes-webui ──
+// ── Step 5: 构建并复制 hermes-web-ui ──
 
-async function copyWebUI() {
-  const webuiDir = path.join(TARGET_DIR, "webui");
-
+async function buildWebUIArtifacts() {
   if (!fs.existsSync(HERMES_WEBUI_DIR)) {
     throw new Error(
       `hermes-webui 目录不存在: ${HERMES_WEBUI_DIR}\n` +
       `设置 HERMES_WEBUI_DIR 环境变量指向 hermes-webui 源码`
     );
   }
+  console.log(`  构建 hermes-web-ui 产物...`);
+  exec("pnpm install", { cwd: HERMES_WEBUI_DIR });
+  exec("pnpm run build", { cwd: HERMES_WEBUI_DIR });
+}
 
-  console.log(`[5/5] 复制 hermes-webui...`);
+function syncWebUIArtifacts() {
+  const webuiDir = path.join(TARGET_DIR, "webui");
+  const sourceDistDir = path.join(HERMES_WEBUI_DIR, "dist");
+  const sourceNodeModules = path.join(HERMES_WEBUI_DIR, "node_modules");
 
   if (fs.existsSync(webuiDir)) {
     fs.rmSync(webuiDir, { recursive: true, force: true });
   }
   fs.mkdirSync(webuiDir, { recursive: true });
 
-  // 复制必要文件
-  for (const f of ["server.py", "bootstrap.py", "requirements.txt"]) {
-    const src = path.join(HERMES_WEBUI_DIR, f);
-    if (fs.existsSync(src)) {
-      fs.copyFileSync(src, path.join(webuiDir, f));
-    }
+  // 复制 dist/server 与 dist/client
+  const sourceServerDir = path.join(sourceDistDir, "server");
+  const sourceClientDir = path.join(sourceDistDir, "client");
+  if (!fs.existsSync(sourceServerDir) || !fs.existsSync(sourceClientDir)) {
+    throw new Error(
+      `hermes-web-ui dist 产物不完整: ${sourceDistDir}\n` +
+      `请检查 npm run build 是否成功生成 dist/server 和 dist/client`
+    );
   }
+  copyDirSync(sourceServerDir, path.join(webuiDir, "server"));
+  copyDirSync(sourceClientDir, path.join(webuiDir, "client"));
 
-  // 复制目录
-  for (const d of ["api", "static"]) {
-    const src = path.join(HERMES_WEBUI_DIR, d);
-    if (fs.existsSync(src)) {
-      copyDirSync(src, path.join(webuiDir, d));
-    }
+  // 复制 node-pty 运行时依赖（server bundle external）
+  const nodePtySrc = path.join(sourceNodeModules, "node-pty");
+  const nodePtyDest = path.join(webuiDir, "node_modules", "node-pty");
+  if (!fs.existsSync(nodePtySrc)) {
+    throw new Error(
+      `未找到 node-pty: ${nodePtySrc}\n` +
+      `请确认 hermes-web-ui 依赖安装完成`
+    );
   }
+  copyDirSync(nodePtySrc, nodePtyDest);
+}
 
-  console.log(`  hermes-webui 复制完成\n`);
+async function copyWebUI(opts = {}) {
+  const skipBuild = Boolean(opts.skipBuild);
+
+  console.log(`[5/5] 构建并复制 hermes-web-ui...`);
+
+  if (!skipBuild) {
+    await buildWebUIArtifacts();
+  }
+  syncWebUIArtifacts();
+
+  console.log(`  hermes-web-ui 打包完成\n`);
 }
 
 // ── 主流程 ──
@@ -404,8 +506,25 @@ async function main() {
   console.log(`  目标目录:     ${TARGET_DIR}`);
   console.log(`  缓存目录:     ${CACHE_DIR}\n`);
 
+  if (onlyStep === "webui") {
+    console.log("仅执行 Step 5: webui build + copy\n");
+    await copyWebUI();
+    console.log("=== 资源打包完成 ===");
+    console.log(`  输出: ${TARGET_DIR}\n`);
+    return;
+  }
+
+  if (onlyStep === "webui-copy") {
+    console.log("仅执行 Step 5(copy): webui copy (跳过构建)\n");
+    await copyWebUI({ skipBuild: true });
+    console.log("=== 资源打包完成 ===");
+    console.log(`  输出: ${TARGET_DIR}\n`);
+    return;
+  }
+
   await installPython();
   await createVenv();
+  createRuntimeZips();
   await installNodejs();
   await installRipgrep();
   await copyWebUI();
@@ -414,13 +533,11 @@ async function main() {
   console.log(`  输出: ${TARGET_DIR}\n`);
 
   // 列出目录大小
-  for (const d of ["python", "venv", "runtime", "tools", "webui"]) {
+  for (const d of ["python.zip", "venv.zip", "runtime", "tools", "webui"]) {
     const p = path.join(TARGET_DIR, d);
     if (fs.existsSync(p)) {
-      try {
-        const size = execSync(`du -sh "${p}"`, { encoding: "utf-8" }).trim().split("\t")[0];
-        console.log(`  ${d}/: ${size}`);
-      } catch {}
+      const size = getDirSizeBytes(p);
+      console.log(`  ${d}/: ${formatBytes(size)}`);
     }
   }
 }

@@ -2,8 +2,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { resolveHermesHome } from "./constants";
 
-// 应用日志（写入 ~/.hermes/app.log）
-const LOG_PATH = path.join(resolveHermesHome(), "app.log");
+// 应用日志（写入 ~/.hermes/desktop.log）
+const LOG_PATH = path.join(resolveHermesHome(), "desktop.log");
 
 // 日志上限 5MB，启动时截断
 const MAX_LOG_SIZE = 5 * 1024 * 1024;

@@ -26,8 +26,20 @@ export class WindowManager {
 
   // 显示主窗口（加载 WebUI）
   async show(opts: ShowOptions): Promise<void> {
+    const targetUrl = `http://127.0.0.1:${opts.port}`;
+
     if (this.win && !this.win.isDestroyed()) {
       log.info(`复用主窗口: id=${this.win.id}`);
+      const currentUrl = this.win.webContents.getURL();
+      if (!currentUrl.startsWith(targetUrl)) {
+        log.info(`窗口当前 URL 非 WebUI，重新加载: ${targetUrl}`);
+        try {
+          await this.win.loadURL(targetUrl);
+        } catch (err) {
+          log.error(`复用窗口加载 WebUI 失败: url=${targetUrl} err=${err}`);
+          await this.loadErrorPage();
+        }
+      }
       this.win.show();
       this.win.focus();
       return;
@@ -107,7 +119,7 @@ export class WindowManager {
     });
 
     // 加载 hermes-webui
-    const url = `http://127.0.0.1:${opts.port}`;
+    const url = targetUrl;
     log.info(`准备加载 WebUI: ${url}`);
     try {
       await this.win.loadURL(url);
@@ -144,47 +156,7 @@ export class WindowManager {
 
   // 错误页
   private async loadErrorPage(): Promise<void> {
-    const html = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hermes Desktop - Error</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body {
-      margin: 0; min-height: 100vh; display: grid; place-items: center;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0b1020; color: #e6ebff;
-    }
-    .card {
-      width: min(680px, calc(100vw - 40px));
-      border-radius: 14px; background: #111938;
-      border: 1px solid #2a366f; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
-      padding: 22px 20px;
-    }
-    h1 { margin: 0 0 10px; font-size: 20px; }
-    p { margin: 0 0 10px; line-height: 1.5; color: #c8d2ff; }
-    button {
-      border: 0; border-radius: 8px; padding: 10px 14px;
-      font-weight: 600; cursor: pointer; color: #fff; background: #8B5CF6;
-    }
-  </style>
-</head>
-<body>
-  <main class="card">
-    <h1>Hermes WebUI not available</h1>
-    <p>Hermes WebUI 未能加载。请尝试重新启动应用。</p>
-    <button id="retryBtn" type="button">Retry</button>
-  </main>
-  <script>
-    document.getElementById("retryBtn")?.addEventListener("click", () => {
-      window.location.reload();
-    });
-  </script>
-</body>
-</html>`;
-
-    await this.win!.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    const errorPage = path.join(app.getAppPath(), "setup", "webui-error.html");
+    await this.win!.loadFile(errorPage);
   }
 }

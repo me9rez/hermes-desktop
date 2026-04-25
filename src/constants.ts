@@ -49,20 +49,25 @@ function resolveDevTargetPath(): string {
   return path.join(app.getAppPath(), "resources", "targets", `${process.platform}-${process.arch}`);
 }
 
+/** 应用运行时目录（userData 下，存放解压后的 python/venv） */
+export function resolveRuntimeDataPath(): string {
+  return path.join(app.getPath("userData"), "runtime");
+}
+
 // ── Python 路径 ──
 
-/** 捆绑的 Python 3.11 二进制 */
+/** 捆绑的 Python 3.13 二进制 */
 export function resolvePythonBin(): string {
-  const res = resolveResourcesPath();
+  const runtime = resolveRuntimeDataPath();
   if (IS_WIN) {
-    return path.join(res, "python", "python.exe");
+    return path.join(runtime, "python", "python.exe");
   }
-  return path.join(res, "python", "bin", "python3.11");
+  return path.join(runtime, "python", "bin", "python3.13");
 }
 
 /** 虚拟环境路径 */
 export function resolveVenvPath(): string {
-  return path.join(resolveResourcesPath(), "venv");
+  return path.join(resolveRuntimeDataPath(), "venv");
 }
 
 /** venv 内的 Python 二进制 */
@@ -71,7 +76,7 @@ export function resolveVenvPythonBin(): string {
   if (IS_WIN) {
     return path.join(venv, "Scripts", "python.exe");
   }
-  return path.join(venv, "bin", "python3.11");
+  return path.join(venv, "bin", "python3.13");
 }
 
 // ── Node.js 路径（用于 browser tools） ──
@@ -87,14 +92,14 @@ export function resolveNodeBin(): string {
 
 // ── WebUI 路径 ──
 
-/** hermes-webui 目录（包含 server.py, api/, static/） */
+/** hermes-webui 目录（包含 server/ 与 client/） */
 export function resolveWebUIDir(): string {
   return path.join(resolveResourcesPath(), "webui");
 }
 
-/** hermes-webui 入口脚本 */
+/** hermes-webui 入口脚本（Node server bundle） */
 export function resolveWebUIEntry(): string {
-  return path.join(resolveWebUIDir(), "server.py");
+  return path.join(resolveWebUIDir(), "server", "index.js");
 }
 
 // ── ripgrep 路径 ──
@@ -154,12 +159,13 @@ export function resolveWebUIPort(): number {
 /** 组装 PATH：venv/bin + python/bin + runtime(node) + tools(rg) + 原 PATH */
 export function buildEnvPath(): string {
   const res = resolveResourcesPath();
+  const runtime = resolveRuntimeDataPath();
   const venvBin = IS_WIN
-    ? path.join(resolveVenvPath(), "Scripts")
-    : path.join(resolveVenvPath(), "bin");
+    ? path.join(runtime, "venv", "Scripts")
+    : path.join(runtime, "venv", "bin");
   const pythonBin = IS_WIN
-    ? path.join(res, "python")
-    : path.join(res, "python", "bin");
+    ? path.join(runtime, "python")
+    : path.join(runtime, "python", "bin");
   const runtimeBin = path.join(res, "runtime");
   const toolsBin = path.join(res, "tools");
   const userBin = resolveUserBinDir();
@@ -170,10 +176,9 @@ export function buildEnvPath(): string {
 
 // ── Setup 完成判断 ──
 
-/** 检查 Setup 是否已完成（config.yaml 和 .env 都存在） */
+/** 检查 Setup 是否已完成（config.yaml 存在且非空） */
 export function isSetupComplete(): boolean {
   const configPath = resolveUserConfigPath();
-  const envPath = resolveUserEnvPath();
   // 基本检查：config.yaml 存在且非空
   if (!fs.existsSync(configPath)) return false;
   try {
@@ -182,6 +187,23 @@ export function isSetupComplete(): boolean {
   } catch {
     return false;
   }
+}
+
+/** 检查运行时是否已就绪（python/venv 和关键可执行文件存在） */
+export function isRuntimeReady(): boolean {
+  const runtime = resolveRuntimeDataPath();
+  const pythonDir = path.join(runtime, "python");
+  const venvDir = path.join(runtime, "venv");
+  if (!fs.existsSync(pythonDir) || !fs.existsSync(venvDir)) return false;
+
+  const pythonBin = IS_WIN
+    ? path.join(pythonDir, "python.exe")
+    : path.join(pythonDir, "bin", "python3.13");
+  const hermesBin = IS_WIN
+    ? path.join(venvDir, "Scripts", "hermes.exe")
+    : path.join(venvDir, "bin", "hermes");
+
+  return fs.existsSync(pythonBin) && fs.existsSync(hermesBin);
 }
 
 // ── 开发分支标识 ──

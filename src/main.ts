@@ -1,13 +1,5 @@
 import * as fs from "fs";
 import * as path from "path";
-
-// 最早期调试：写到文件确认 main.js 是否被加载
-try {
-  const home = process.env.HOME || "/tmp";
-  fs.appendFileSync(path.join(home, ".hermes", "boot.log"),
-    `[${new Date().toISOString()}] main.ts loaded, argv=${process.argv.join(" ")}\n`);
-} catch {}
-
 import { app, ipcMain, shell, Menu, BrowserWindow } from "electron";
 import { WebUIProcess } from "./webui-process";
 import { WindowManager } from "./window";
@@ -25,7 +17,7 @@ import {
   setProgressCallback,
   setUpdateBannerStateCallback,
 } from "./auto-updater";
-import { isSetupComplete, resolveWebUIPort, resolveWebUILogPath, resolveHermesHome } from "./constants";
+import { isSetupComplete, isRuntimeReady, resolveWebUIPort, resolveWebUILogPath, resolveHermesHome } from "./constants";
 import * as log from "./logger";
 
 // ── 单实例锁 ──
@@ -210,10 +202,12 @@ app.whenReady().then(async () => {
   fs.mkdirSync(resolveHermesHome(), { recursive: true });
 
   // 启动判定
-  if (isSetupComplete()) {
+  const setupComplete = isSetupComplete();
+  const runtimeReady = isRuntimeReady();
+  if (setupComplete && runtimeReady) {
     await startWebUIAndShowMain("app:startup");
   } else {
-    setupManager.showSetup();
+    setupManager.showSetup(setupComplete ? "repair" : "normal");
   }
 });
 

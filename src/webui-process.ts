@@ -1,7 +1,7 @@
 import { ChildProcess, spawn } from "child_process";
 import * as http from "http";
-import * as path from "path";
 import * as fs from "fs";
+import * as path from "path";
 import { app } from "electron";
 import {
   DEFAULT_PORT,
@@ -10,14 +10,14 @@ import {
   CRASH_COOLDOWN_MS,
   IS_WIN,
   resolveWebUILogPath,
-  resolvePythonBin,
+  resolveNodeBin,
   resolveWebUIEntry,
   resolveWebUIDir,
   resolveHermesHome,
-  resolveVenvPath,
   resolveResourcesPath,
   resolveWebUIPort,
   buildEnvPath,
+  resolveVenvPath,
 } from "./constants";
 
 // 诊断日志（写入 ~/.hermes/desktop.log）
@@ -122,9 +122,8 @@ export class WebUIProcess {
 
     this.setState("starting");
 
-    // 使用 standalone Python（不依赖 @rpath），而非 venv 的 Python
-    // macOS SIP/hardened runtime 会清除 DYLD_LIBRARY_PATH，导致 venv python 找不到 libpython
-    const pythonBin = resolvePythonBin();
+    // 使用捆绑的 Node.js 启动 web-ui server bundle
+    const nodeBin = resolveNodeBin();
     const entry = resolveWebUIEntry();
     const cwd = resolveWebUIDir();
     const hermesHome = resolveHermesHome();
@@ -133,15 +132,15 @@ export class WebUIProcess {
     diagLog(`--- webui start ---`);
     diagLog(`platform=${process.platform} arch=${process.arch} packaged=${app.isPackaged}`);
     diagLog(`resourcesPath=${resolveResourcesPath()}`);
-    diagLog(`pythonBin=${pythonBin} exists=${fs.existsSync(pythonBin)}`);
+    diagLog(`nodeBin=${nodeBin} exists=${fs.existsSync(nodeBin)}`);
     diagLog(`entry=${entry} exists=${fs.existsSync(entry)}`);
     diagLog(`cwd=${cwd} exists=${fs.existsSync(cwd)}`);
     diagLog(`hermesHome=${hermesHome}`);
     diagLog(`port=${this.port}`);
 
     // 检查关键文件
-    if (!fs.existsSync(pythonBin)) {
-      diagLog(`FATAL: Python 二进制不存在: ${pythonBin}`);
+    if (nodeBin !== "node" && !fs.existsSync(nodeBin)) {
+      diagLog(`FATAL: Node 二进制不存在: ${nodeBin}`);
       this.setState("stopped");
       return;
     }
@@ -158,28 +157,28 @@ export class WebUIProcess {
     const gen = ++this.generation;
 
     const envPath = buildEnvPath();
+    const hermesBin = IS_WIN
+      ? path.join(resolveVenvPath(), "Scripts", "hermes.exe")
+      : path.join(resolveVenvPath(), "bin", "hermes");
     const args = [entry];
 
-    diagLog(`spawn: ${pythonBin} ${args.join(" ")} (gen=${gen})`);
+    diagLog(`spawn: ${nodeBin} ${args.join(" ")} (gen=${gen})`);
 
-    this.proc = spawn(pythonBin, args, {
+    this.proc = spawn(nodeBin, args, {
       cwd,
       env: {
         ...process.env,
         HERMES_HOME: hermesHome,
+        PORT: String(this.port),
         HERMES_WEBUI_PORT: String(this.port),
         HERMES_WEBUI_HOST: "127.0.0.1",
-        VIRTUAL_ENV: resolveVenvPath(),
         PATH: envPath,
+        HERMES_BIN: hermesBin,
         // 告诉 hermes-agent 安装位置
         HERMES_INSTALL_ROOT: resolveResourcesPath(),
-        // 确保 Python 不缓冲输出
-        PYTHONUNBUFFERED: "1",
-        // 使用 standalone python 但加载 venv 的 site-packages
-        // Windows: Lib/site-packages, macOS/Linux: lib/python3.11/site-packages
-        PYTHONPATH: IS_WIN
-          ? path.join(resolveVenvPath(), "Lib", "site-packages")
-          : path.join(resolveVenvPath(), "lib", "python3.11", "site-packages"),
+        // Windows 默认代码页下强制 Python 使用 UTF-8，避免 gateway 启动时 UnicodeEncodeError
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

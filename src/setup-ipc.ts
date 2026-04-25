@@ -1,11 +1,42 @@
 import { ipcMain } from "electron";
 import * as fs from "fs";
-import { resolveHermesHome, resolveUserConfigPath, resolveUserEnvPath } from "./constants";
+import * as path from "path";
+import { execFileSync } from "child_process";
+import {
+  resolveHermesHome,
+  resolveResourcesPath,
+  resolveRuntimeDataPath,
+  resolveUserConfigPath,
+  resolveUserEnvPath,
+} from "./constants";
 import { SetupManager } from "./setup-manager";
 import * as log from "./logger";
 
 interface SetupIpcOptions {
   setupManager: SetupManager;
+}
+
+function extractRuntimeZips(): void {
+  const sourceBase = resolveResourcesPath();
+  const runtimeBase = resolveRuntimeDataPath();
+  const pythonZip = path.join(sourceBase, "python.zip");
+  const venvZip = path.join(sourceBase, "venv.zip");
+
+  if (!fs.existsSync(pythonZip)) {
+    throw new Error(`缺少运行时归档文件: ${pythonZip}`);
+  }
+  if (!fs.existsSync(venvZip)) {
+    throw new Error(`缺少运行时归档文件: ${venvZip}`);
+  }
+
+  fs.mkdirSync(runtimeBase, { recursive: true });
+
+  // 清理旧目录后再解压，避免增量覆盖带来残留文件。
+  fs.rmSync(path.join(runtimeBase, "python"), { recursive: true, force: true });
+  fs.rmSync(path.join(runtimeBase, "venv"), { recursive: true, force: true });
+
+  execFileSync("tar", ["-xf", pythonZip, "-C", runtimeBase], { stdio: "pipe" });
+  execFileSync("tar", ["-xf", venvZip, "-C", runtimeBase], { stdio: "pipe" });
 }
 
 export function registerSetupIpc(opts: SetupIpcOptions): void {
@@ -19,6 +50,8 @@ export function registerSetupIpc(opts: SetupIpcOptions): void {
     baseUrl?: string;
   }) => {
     try {
+      extractRuntimeZips();
+
       const hermesHome = resolveHermesHome();
       fs.mkdirSync(hermesHome, { recursive: true });
 
@@ -88,6 +121,18 @@ export function registerSetupIpc(opts: SetupIpcOptions): void {
       return { success: ok };
     } catch (err: any) {
       log.error(`[setup] 配置写入失败: ${err?.message ?? err}`);
+      return { success: false, error: err?.message ?? String(err) };
+    }
+  });
+
+  // 修复运行时（仅解压 python/venv，不改用户配置）
+  ipcMain.handle("setup:repair-runtime", async () => {
+    try {
+      extractRuntimeZips();
+      const ok = await setupManager.complete();
+      return { success: ok };
+    } catch (err: any) {
+      log.error(`[setup] 运行时修复失败: ${err?.message ?? err}`);
       return { success: false, error: err?.message ?? String(err) };
     }
   });

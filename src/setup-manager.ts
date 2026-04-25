@@ -12,7 +12,7 @@ export class SetupManager {
     this.onComplete = cb;
   }
 
-  showSetup(): void {
+  showSetup(mode: "normal" | "repair" = "normal"): void {
     const lang = app.getLocale().startsWith("zh") ? "zh" : "en";
     const tag = resolveDevBranchTag();
     const title = lang === "zh" ? `Hermes Desktop 安装引导${tag}` : `Hermes Desktop Setup${tag}`;
@@ -41,7 +41,7 @@ export class SetupManager {
     });
 
     this.setupWin.loadFile(path.join(__dirname, "..", "setup", "index.html"), {
-      query: { lang },
+      query: { lang, mode },
     });
     this.setupWin.show();
   }
