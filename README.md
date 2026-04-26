@@ -24,7 +24,7 @@
 > **不装 Python，不跑 `pip install`，不配环境变量。**
 > 双击安装包 → 输入 API Key → 开始对话。就这么简单。
 
-Hermes Desktop 把 [Hermes Agent](https://github.com/NousResearch/hermes-agent)（Nous Research 出品的开源 AI Agent）打包成一个**开箱即用**的桌面应用。内置 Python 3.14 运行时、Node.js 24、ripgrep 和完整的 Hermes 生态，你不需要任何开发工具链。
+Hermes Desktop 把 [Hermes Agent](https://github.com/NousResearch/hermes-agent)（Nous Research 出品的开源 AI Agent）打包成一个**开箱即用**的桌面应用。内置 Python 3.13 运行时、Node.js 24、ripgrep 和完整的 Hermes 生态，你不需要任何开发工具链。
 
 它的目标很简单：**让 AI 真正替你动手做事，而不是只会聊天。** 🎯
 

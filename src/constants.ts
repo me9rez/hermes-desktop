@@ -33,6 +33,14 @@ export const WINDOW_MIN_HEIGHT = 600;
 
 export const IS_WIN = process.platform === "win32";
 
+interface RuntimeVersionInfo {
+  schemaVersion?: number;
+  targetId?: string;
+  pythonVersion?: string;
+  hermesAgentCommit?: string;
+  generatedAt?: string;
+}
+
 // ── 路径解析（自动适配 dev / packaged 两种环境） ──
 
 /** 资源根目录（dev 模式指向 targets/<platform-arch>，打包后 afterPack 已拍平） */
@@ -52,6 +60,51 @@ function resolveDevTargetPath(): string {
 /** 应用运行时目录（userData 下，存放解压后的 python/venv） */
 export function resolveRuntimeDataPath(): string {
   return path.join(app.getPath("userData"), "runtime");
+}
+
+/** 打包内 runtime 版本文件 */
+export function resolveBundledRuntimeVersionPath(): string {
+  return path.join(resolveResourcesPath(), "runtime-version.json");
+}
+
+/** 本地已解压 runtime 版本文件 */
+export function resolveLocalRuntimeVersionPath(): string {
+  return path.join(resolveRuntimeDataPath(), "runtime-version.json");
+}
+
+function readRuntimeVersionFile(filePath: string): RuntimeVersionInfo | null {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as RuntimeVersionInfo;
+  } catch {
+    return null;
+  }
+}
+
+/** 读取打包内 runtime 版本信息 */
+export function readBundledRuntimeVersion(): RuntimeVersionInfo | null {
+  return readRuntimeVersionFile(resolveBundledRuntimeVersionPath());
+}
+
+/** 读取本地 runtime 版本信息 */
+export function readLocalRuntimeVersion(): RuntimeVersionInfo | null {
+  return readRuntimeVersionFile(resolveLocalRuntimeVersionPath());
+}
+
+/** 比较 runtime 版本是否一致（pythonVersion + hermesAgentCommit） */
+export function isRuntimeVersionMatched(): boolean {
+  const bundled = readBundledRuntimeVersion();
+  const local = readLocalRuntimeVersion();
+  // 兼容旧资源包：无 bundled 版本文件时不阻断启动。
+  if (!bundled) return true;
+  if (!local) return false;
+  if (!bundled.pythonVersion || !bundled.hermesAgentCommit) return false;
+  if (!local.pythonVersion || !local.hermesAgentCommit) return false;
+  return bundled.pythonVersion === local.pythonVersion
+    && bundled.hermesAgentCommit === local.hermesAgentCommit;
 }
 
 // ── Python 路径 ──

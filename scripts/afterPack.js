@@ -92,7 +92,7 @@ exports.default = async function afterPack(context) {
   }
 
   // 注入运行时压缩包（setup 时再解压）
-  for (const file of ["python.zip", "venv.zip"]) {
+  for (const file of ["python.zip", "venv.zip", "runtime-version.json"]) {
     const src = path.join(sourceBase, file);
     if (!fs.existsSync(src)) {
       throw new Error(`[afterPack] 未找到运行时归档: ${src}`);

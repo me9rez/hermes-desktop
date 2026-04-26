@@ -17,7 +17,14 @@ import {
   setProgressCallback,
   setUpdateBannerStateCallback,
 } from "./auto-updater";
-import { isSetupComplete, isRuntimeReady, resolveWebUIPort, resolveWebUILogPath, resolveHermesHome } from "./constants";
+import {
+  isSetupComplete,
+  isRuntimeReady,
+  isRuntimeVersionMatched,
+  resolveWebUIPort,
+  resolveWebUILogPath,
+  resolveHermesHome,
+} from "./constants";
 import * as log from "./logger";
 
 // ── 单实例锁 ──
@@ -204,9 +211,13 @@ app.whenReady().then(async () => {
   // 启动判定
   const setupComplete = isSetupComplete();
   const runtimeReady = isRuntimeReady();
-  if (setupComplete && runtimeReady) {
+  const runtimeVersionMatched = isRuntimeVersionMatched();
+  if (setupComplete && runtimeReady && runtimeVersionMatched) {
     await startWebUIAndShowMain("app:startup");
   } else {
+    log.info(
+      `进入 setup: setupComplete=${setupComplete} runtimeReady=${runtimeReady} runtimeVersionMatched=${runtimeVersionMatched}`,
+    );
     setupManager.showSetup(setupComplete ? "repair" : "normal");
   }
 });

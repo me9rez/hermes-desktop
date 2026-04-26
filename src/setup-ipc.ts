@@ -1,9 +1,11 @@
 import { ipcMain } from "electron";
 import * as fs from "fs";
 import * as path from "path";
-import { execFileSync } from "child_process";
+import { spawn } from "child_process";
 import {
+  resolveBundledRuntimeVersionPath,
   resolveHermesHome,
+  resolveLocalRuntimeVersionPath,
   resolveResourcesPath,
   resolveRuntimeDataPath,
   resolveUserConfigPath,
@@ -16,11 +18,40 @@ interface SetupIpcOptions {
   setupManager: SetupManager;
 }
 
-function extractRuntimeZips(): void {
+let extractTask: Promise<void> | null = null;
+
+function runTarExtract(zipPath: string, targetDir: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("tar", ["-xf", zipPath, "-C", targetDir], {
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (err) => {
+      reject(new Error(`解压失败: ${zipPath} (${err.message})`));
+    });
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const detail = stderr.trim();
+      reject(new Error(`解压失败: ${zipPath}${detail ? ` (${detail})` : ""}`));
+    });
+  });
+}
+
+async function extractRuntimeZips(): Promise<void> {
   const sourceBase = resolveResourcesPath();
   const runtimeBase = resolveRuntimeDataPath();
   const pythonZip = path.join(sourceBase, "python.zip");
   const venvZip = path.join(sourceBase, "venv.zip");
+  const bundledRuntimeVersion = resolveBundledRuntimeVersionPath();
+  const localRuntimeVersion = resolveLocalRuntimeVersionPath();
 
   if (!fs.existsSync(pythonZip)) {
     throw new Error(`缺少运行时归档文件: ${pythonZip}`);
@@ -35,8 +66,21 @@ function extractRuntimeZips(): void {
   fs.rmSync(path.join(runtimeBase, "python"), { recursive: true, force: true });
   fs.rmSync(path.join(runtimeBase, "venv"), { recursive: true, force: true });
 
-  execFileSync("tar", ["-xf", pythonZip, "-C", runtimeBase], { stdio: "pipe" });
-  execFileSync("tar", ["-xf", venvZip, "-C", runtimeBase], { stdio: "pipe" });
+  await runTarExtract(pythonZip, runtimeBase);
+  await runTarExtract(venvZip, runtimeBase);
+
+  if (fs.existsSync(bundledRuntimeVersion)) {
+    fs.copyFileSync(bundledRuntimeVersion, localRuntimeVersion);
+  }
+}
+
+async function ensureRuntimeExtracted(): Promise<void> {
+  if (!extractTask) {
+    extractTask = extractRuntimeZips().finally(() => {
+      extractTask = null;
+    });
+  }
+  await extractTask;
 }
 
 export function registerSetupIpc(opts: SetupIpcOptions): void {
@@ -50,7 +94,7 @@ export function registerSetupIpc(opts: SetupIpcOptions): void {
     baseUrl?: string;
   }) => {
     try {
-      extractRuntimeZips();
+      await ensureRuntimeExtracted();
 
       const hermesHome = resolveHermesHome();
       fs.mkdirSync(hermesHome, { recursive: true });
@@ -128,7 +172,7 @@ export function registerSetupIpc(opts: SetupIpcOptions): void {
   // 修复运行时（仅解压 python/venv，不改用户配置）
   ipcMain.handle("setup:repair-runtime", async () => {
     try {
-      extractRuntimeZips();
+      await ensureRuntimeExtracted();
       const ok = await setupManager.complete();
       return { success: ok };
     } catch (err: any) {

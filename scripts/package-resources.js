@@ -3,7 +3,7 @@
  * package-resources.js — Hermes Desktop 资源打包脚本
  *
  * 下载并准备所有运行时依赖：
- *   1. Standalone Python 3.14.4 (python-build-standalone)
+ *   1. Standalone Python 3.13.13 (python-build-standalone)
  *   2. 创建 venv 并安装 hermes-agent + hermes-webui 依赖
  *   3. Node.js 24.15.0 (用于 browser tools + webui server)
  *   4. ripgrep 二进制
@@ -24,7 +24,7 @@ const axios = require("axios");
 
 // ── 版本配置 ──
 
-const PYTHON_VERSION = "3.14.4";
+const PYTHON_VERSION = "3.13.13";
 const PYTHON_STANDALONE_TAG = "20260414";
 const NODE_VERSION = "24.15.0";
 const RIPGREP_VERSION = "14.1.1";
@@ -40,6 +40,7 @@ function getArg(name) {
 const targetPlatform = getArg("platform") || process.platform;
 const targetArch = getArg("arch") || process.arch;
 const onlyStep = getArg("only") || "";
+const forceRebuildVenv = args.includes("--rebuild-venv");
 const targetId = `${targetPlatform}-${targetArch}`;
 
 console.log(`\n[package-resources] 目标: ${targetId}\n`);
@@ -48,9 +49,15 @@ console.log(`\n[package-resources] 目标: ${targetId}\n`);
 
 const ROOT = path.resolve(__dirname, "..");
 const CACHE_DIR = path.join(ROOT, ".cache");
+const CACHE_DOWNLOADS_DIR = path.join(CACHE_DIR, "downloads");
+const CACHE_ARTIFACTS_DIR = path.join(CACHE_DIR, "artifacts", targetId);
+const CACHE_STAMPS_DIR = path.join(CACHE_DIR, "stamps");
 const TARGET_DIR = path.join(ROOT, "resources", "targets", targetId);
 
 fs.mkdirSync(CACHE_DIR, { recursive: true });
+fs.mkdirSync(CACHE_DOWNLOADS_DIR, { recursive: true });
+fs.mkdirSync(CACHE_ARTIFACTS_DIR, { recursive: true });
+fs.mkdirSync(CACHE_STAMPS_DIR, { recursive: true });
 fs.mkdirSync(TARGET_DIR, { recursive: true });
 
 // hermes-agent 和 hermes-webui 源码路径
@@ -61,42 +68,110 @@ const HERMES_WEBUI_DIR = process.env.HERMES_WEBUI_DIR
 
 // ── 工具函数 ──
 
-function stampFile(name) {
-  return path.join(TARGET_DIR, `.stamp-${name}`);
+function stampFile() {
+  return path.join(CACHE_STAMPS_DIR, `${targetId}.json`);
+}
+
+function readStamps() {
+  const sf = stampFile();
+  if (!fs.existsSync(sf)) return {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(sf, "utf-8"));
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function writeStamps(stamps) {
+  const sf = stampFile();
+  fs.writeFileSync(sf, `${JSON.stringify(stamps, null, 2)}\n`, "utf-8");
 }
 
 function isStampValid(name, version) {
-  const sf = stampFile(name);
-  if (!fs.existsSync(sf)) return false;
-  return fs.readFileSync(sf, "utf-8").trim() === version;
+  const stamps = readStamps();
+  return stamps[name] === version;
 }
 
 function writeStamp(name, version) {
-  fs.writeFileSync(stampFile(name), version, "utf-8");
+  const stamps = readStamps();
+  stamps[name] = version;
+  writeStamps(stamps);
+}
+
+function getHermesAgentCommit() {
+  try {
+    return execSync("git rev-parse HEAD", {
+      cwd: HERMES_AGENT_DIR,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (err) {
+    throw new Error(
+      `无法获取 hermes-agent commit id: ${HERMES_AGENT_DIR}\n` +
+      `请确认该目录是 git 仓库且可执行 git rev-parse HEAD`
+    );
+  }
+}
+
+function ensureUvAvailable() {
+  try {
+    execSync("uv --version", { stdio: "pipe" });
+  } catch {
+    throw new Error(
+      "未检测到 uv，请先安装 uv 并确保可在 PATH 中访问（命令: uv --version）"
+    );
+  }
+}
+
+function resolveAxiosProxy() {
+  const raw = process.env.HERMES_DOWNLOAD_PROXY
+    || process.env.HTTPS_PROXY
+    || process.env.HTTP_PROXY
+    || "";
+  if (!raw.trim()) return null;
+  try {
+    const u = new URL(raw);
+    if (!u.hostname || !u.port) return null;
+    return {
+      protocol: u.protocol.replace(":", ""),
+      host: u.hostname,
+      port: Number.parseInt(u.port, 10),
+      auth: u.username ? {
+        username: decodeURIComponent(u.username),
+        password: decodeURIComponent(u.password || ""),
+      } : undefined,
+    };
+  } catch {
+    console.warn(`  警告: 无法解析代理地址，忽略代理: ${raw}`);
+    return null;
+  }
 }
 
 function download(url, destPath) {
   const MAX_RETRIES = 3;
-  const proxy = {
-    protocol: "http",
-    host: "127.0.0.1",
-    port: 7890,
-  };
+  const proxy = resolveAxiosProxy();
 
   async function run(attempt = 1) {
-    console.log(`  下载: ${url} (attempt ${attempt}/${MAX_RETRIES})`);
+    console.log(
+      `  下载: ${url} (attempt ${attempt}/${MAX_RETRIES})` +
+      (proxy ? ` via ${proxy.protocol}://${proxy.host}:${proxy.port}` : " (direct)")
+    );
     const file = fs.createWriteStream(destPath);
     try {
-      const res = await axios({
+      const req = {
         method: "get",
         url,
         responseType: "stream",
         timeout: 300000,
         maxRedirects: 10,
-        proxy,
         headers: { "User-Agent": "hermes-desktop" },
         validateStatus: (status) => status >= 200 && status < 400,
-      });
+      };
+      if (proxy) req.proxy = proxy;
+
+      const res = await axios(req);
 
       const total = parseInt(res.headers["content-length"] || "0", 10);
       let downloaded = 0;
@@ -129,6 +204,21 @@ function download(url, destPath) {
   return run();
 }
 
+async function downloadWithFallback(urls, destPath) {
+  let lastErr = null;
+  for (const url of urls) {
+    try {
+      await download(url, destPath);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const msg = err?.message || String(err);
+      console.warn(`  下载失败，切换备用地址: ${url}\n    -> ${msg}`);
+    }
+  }
+  throw lastErr || new Error(`下载失败: ${urls.join(", ")}`);
+}
+
 function exec(cmd, opts = {}) {
   console.log(`  执行: ${cmd}`);
   return execSync(cmd, { stdio: "inherit", ...opts });
@@ -153,6 +243,29 @@ function copyDirSync(src, dest) {
       fs.copyFileSync(s, d);
     }
   }
+}
+
+function copyDirAllSync(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirAllSync(s, d);
+    } else if (entry.isSymbolicLink()) {
+      try {
+        const real = fs.realpathSync(s);
+        fs.copyFileSync(real, d);
+      } catch {}
+    } else {
+      fs.copyFileSync(s, d);
+    }
+  }
+}
+
+function resetDir(dir) {
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
 }
 
 function getDirSizeBytes(dir) {
@@ -216,18 +329,24 @@ function createRuntimeZips() {
   console.log(`  已生成: ${venvZip}\n`);
 }
 
-// ── Step 1: Python 3.11 ──
+// ── Step 1: Python 3.13.13 ──
 
 async function installPython() {
   const pythonDir = path.join(TARGET_DIR, "python");
   const stampVersion = `${PYTHON_VERSION}-${PYTHON_STANDALONE_TAG}`;
+  const artifactRoot = path.join(CACHE_ARTIFACTS_DIR, `python-${stampVersion}`);
+  const artifactPythonDir = path.join(artifactRoot, "python");
 
-  if (isStampValid("python", stampVersion) && fs.existsSync(pythonDir)) {
-    console.log(`[1/5] Python ${PYTHON_VERSION} 已缓存，跳过`);
+  if (isStampValid("python", stampVersion) && fs.existsSync(artifactPythonDir)) {
+    console.log(`[1/5] Python ${PYTHON_VERSION} 命中产物缓存`);
+    if (fs.existsSync(pythonDir)) {
+      fs.rmSync(pythonDir, { recursive: true, force: true });
+    }
+    copyDirAllSync(artifactPythonDir, pythonDir);
     return;
   }
 
-  console.log(`[1/5] 下载 Python ${PYTHON_VERSION} (standalone)...`);
+  console.log(`[1/5] Python ${PYTHON_VERSION} 产物缓存未命中，开始准备...`);
 
   const archMap = {
     "darwin-arm64": "aarch64-apple-darwin",
@@ -239,31 +358,41 @@ async function installPython() {
   if (!triple) throw new Error(`不支持的平台: ${targetId}`);
 
   const filename = `cpython-${PYTHON_VERSION}+${PYTHON_STANDALONE_TAG}-${triple}-install_only.tar.gz`;
-  const url = `https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_STANDALONE_TAG}/${filename}`;
+  const pythonUrlCandidates = [
+    `https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_STANDALONE_TAG}/${filename}`,
+    `https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_STANDALONE_TAG}/${filename}`,
+  ];
 
-  const cachePath = path.join(CACHE_DIR, filename);
+  const cachePath = path.join(CACHE_DOWNLOADS_DIR, filename);
   if (!fs.existsSync(cachePath)) {
-    await download(url, cachePath);
+    console.log(`  下载缓存未命中: ${cachePath}`);
+    await downloadWithFallback(pythonUrlCandidates, cachePath);
   } else {
-    console.log(`  使用缓存: ${cachePath}`);
+    console.log(`  下载缓存命中: ${cachePath}`);
+  }
+
+  console.log(`  解压到产物缓存: ${artifactRoot}`);
+  resetDir(artifactRoot);
+  exec(`tar xzf "${cachePath}" -C "${artifactRoot}"`, { stdio: "pipe" });
+  if (!fs.existsSync(artifactPythonDir)) {
+    throw new Error(`Python 产物缓存生成失败: ${artifactPythonDir}`);
   }
 
   if (fs.existsSync(pythonDir)) {
     fs.rmSync(pythonDir, { recursive: true, force: true });
   }
-
-  console.log(`  解压到: ${TARGET_DIR}/python/`);
-  fs.mkdirSync(pythonDir, { recursive: true });
-  exec(`tar xzf "${cachePath}" -C "${TARGET_DIR}"`, { stdio: "pipe" });
+  copyDirAllSync(artifactPythonDir, pythonDir);
 
   writeStamp("python", stampVersion);
-  console.log(`  Python ${PYTHON_VERSION} 安装完成\n`);
+  console.log(`  Python ${PYTHON_VERSION} 准备完成\n`);
 }
 
 // ── Step 2: 创建 venv 并安装依赖 ──
 
 async function createVenv() {
   const venvDir = path.join(TARGET_DIR, "venv");
+  const hermesAgentCommit = getHermesAgentCommit();
+  const venvFingerprint = `${hermesAgentCommit}-${PYTHON_VERSION}`;
   const pythonBin = targetPlatform === "win32"
     ? path.join(TARGET_DIR, "python", "python.exe")
     : path.join(TARGET_DIR, "python", "bin", "python3.13");
@@ -276,36 +405,68 @@ async function createVenv() {
   }
 
   console.log(`[2/5] 创建 venv 并安装 hermes-agent...`);
-
-  if (fs.existsSync(venvDir)) {
-    fs.rmSync(venvDir, { recursive: true, force: true });
-  }
-  exec(`"${pythonBin}" -m venv "${venvDir}"`, { stdio: "pipe" });
+  ensureUvAvailable();
 
   const venvPythonBin = targetPlatform === "win32"
     ? path.join(venvDir, "Scripts", "python.exe")
     : path.join(venvDir, "bin", "python3.13");
+  const venvHermesBin = targetPlatform === "win32"
+    ? path.join(venvDir, "Scripts", "hermes.exe")
+    : path.join(venvDir, "bin", "hermes");
+  const cacheHit = !forceRebuildVenv
+    && isStampValid("venv", venvFingerprint)
+    && fs.existsSync(venvPythonBin)
+    && fs.existsSync(venvHermesBin);
 
-  exec(`"${venvPythonBin}" -m pip install --upgrade pip`, { stdio: "pipe" });
+  if (cacheHit) {
+    console.log(`  venv 缓存命中: ${venvFingerprint}`);
+    return;
+  }
+
+  if (fs.existsSync(venvDir)) {
+    fs.rmSync(venvDir, { recursive: true, force: true });
+  }
+  exec(`uv venv --python "${pythonBin}" "${venvDir}"`, { stdio: "pipe" });
+
   // 不用 -e（editable），确保代码实际复制到 site-packages，便于在其他机器上运行
-  exec(`"${venvPythonBin}" -m pip install "${HERMES_AGENT_DIR}[cli,pty,mcp,web,voice,messaging]"`);
-  exec(`"${venvPythonBin}" -m pip install "pyyaml>=6.0"`, { stdio: "pipe" });
+  exec(`uv pip install --python "${venvPythonBin}" "${HERMES_AGENT_DIR}[cli,pty,mcp,web,voice,messaging]"`);
+  exec(`uv pip install --python "${venvPythonBin}" "pyyaml>=6.0"`, { stdio: "pipe" });
 
-  writeStamp("venv", "hermes-agent-latest");
+  writeStamp("venv", venvFingerprint);
   console.log(`  venv 创建完成\n`);
+}
+
+function writeRuntimeVersion() {
+  const runtimeVersionPath = path.join(TARGET_DIR, "runtime-version.json");
+  const payload = {
+    schemaVersion: 1,
+    targetId,
+    pythonVersion: PYTHON_VERSION,
+    hermesAgentCommit: getHermesAgentCommit(),
+    generatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(runtimeVersionPath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
+  console.log(`  已生成: ${runtimeVersionPath}`);
 }
 
 // ── Step 3: Node.js 24 ──
 
 async function installNodejs() {
   const runtimeDir = path.join(TARGET_DIR, "runtime");
+  const artifactRoot = path.join(CACHE_ARTIFACTS_DIR, `node-${NODE_VERSION}`);
+  const artifactRuntimeDir = path.join(artifactRoot, "runtime");
+  const artifactNodeBin = path.join(artifactRuntimeDir, targetPlatform === "win32" ? "node.exe" : "node");
 
-  if (isStampValid("nodejs", NODE_VERSION) && fs.existsSync(runtimeDir)) {
-    console.log(`[3/5] Node.js ${NODE_VERSION} 已缓存，跳过`);
+  if (isStampValid("nodejs", NODE_VERSION) && fs.existsSync(artifactNodeBin)) {
+    console.log(`[3/5] Node.js ${NODE_VERSION} 命中产物缓存`);
+    if (fs.existsSync(runtimeDir)) {
+      fs.rmSync(runtimeDir, { recursive: true, force: true });
+    }
+    copyDirAllSync(artifactRuntimeDir, runtimeDir);
     return;
   }
 
-  console.log(`[3/5] 下载 Node.js ${NODE_VERSION}...`);
+  console.log(`[3/5] Node.js ${NODE_VERSION} 产物缓存未命中，开始准备...`);
 
   const archMap = {
     "darwin-arm64": "darwin-arm64",
@@ -318,22 +479,22 @@ async function installNodejs() {
 
   const ext = targetPlatform === "win32" ? "zip" : "tar.gz";
   const filename = `node-v${NODE_VERSION}-${nodeArch}.${ext}`;
-  const url = `https://nodejs.org/dist/v${NODE_VERSION}/${filename}`;
+  const nodeUrlCandidates = [
+    `https://nodejs.org/dist/v${NODE_VERSION}/${filename}`,
+  ];
 
-  const cachePath = path.join(CACHE_DIR, filename);
+  const cachePath = path.join(CACHE_DOWNLOADS_DIR, filename);
   if (!fs.existsSync(cachePath)) {
-    await download(url, cachePath);
+    console.log(`  下载缓存未命中: ${cachePath}`);
+    await downloadWithFallback(nodeUrlCandidates, cachePath);
   } else {
-    console.log(`  使用缓存: ${cachePath}`);
+    console.log(`  下载缓存命中: ${cachePath}`);
   }
 
-  if (fs.existsSync(runtimeDir)) {
-    fs.rmSync(runtimeDir, { recursive: true, force: true });
-  }
-  fs.mkdirSync(runtimeDir, { recursive: true });
+  resetDir(artifactRuntimeDir);
 
   // 解压并只提取 node 二进制
-  const tmpDir = path.join(CACHE_DIR, `node-extract-${targetId}`);
+  const tmpDir = path.join(CACHE_DIR, "tmp", `node-extract-${targetId}`);
   if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.mkdirSync(tmpDir, { recursive: true });
 
@@ -342,33 +503,48 @@ async function installNodejs() {
     const extracted = path.join(tmpDir, `node-v${NODE_VERSION}-${nodeArch}`);
     for (const f of ["node.exe"]) {
       const src = path.join(extracted, f);
-      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(runtimeDir, f));
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(artifactRuntimeDir, f));
     }
   } else {
     exec(`tar xzf "${cachePath}" -C "${tmpDir}" --strip-components=1`, { stdio: "pipe" });
     const nodeSrc = path.join(tmpDir, "bin", "node");
     if (fs.existsSync(nodeSrc)) {
-      fs.copyFileSync(nodeSrc, path.join(runtimeDir, "node"));
-      fs.chmodSync(path.join(runtimeDir, "node"), 0o755);
+      fs.copyFileSync(nodeSrc, path.join(artifactRuntimeDir, "node"));
+      fs.chmodSync(path.join(artifactRuntimeDir, "node"), 0o755);
     }
   }
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (!fs.existsSync(artifactNodeBin)) {
+    throw new Error(`Node.js 产物缓存生成失败: ${artifactNodeBin}`);
+  }
+  if (fs.existsSync(runtimeDir)) {
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  }
+  copyDirAllSync(artifactRuntimeDir, runtimeDir);
   writeStamp("nodejs", NODE_VERSION);
-  console.log(`  Node.js ${NODE_VERSION} 安装完成\n`);
+  console.log(`  Node.js ${NODE_VERSION} 准备完成\n`);
 }
 
 // ── Step 4: ripgrep ──
 
 async function installRipgrep() {
   const toolsDir = path.join(TARGET_DIR, "tools");
+  const artifactRoot = path.join(CACHE_ARTIFACTS_DIR, `ripgrep-${RIPGREP_VERSION}`);
+  const artifactToolsDir = path.join(artifactRoot, "tools");
+  const rgBin = targetPlatform === "win32" ? "rg.exe" : "rg";
+  const artifactRgBin = path.join(artifactToolsDir, rgBin);
 
-  if (isStampValid("ripgrep", RIPGREP_VERSION) && fs.existsSync(toolsDir)) {
-    console.log(`[4/5] ripgrep ${RIPGREP_VERSION} 已缓存，跳过`);
+  if (isStampValid("ripgrep", RIPGREP_VERSION) && fs.existsSync(artifactRgBin)) {
+    console.log(`[4/5] ripgrep ${RIPGREP_VERSION} 命中产物缓存`);
+    if (fs.existsSync(toolsDir)) {
+      fs.rmSync(toolsDir, { recursive: true, force: true });
+    }
+    copyDirAllSync(artifactToolsDir, toolsDir);
     return;
   }
 
-  console.log(`[4/5] 下载 ripgrep ${RIPGREP_VERSION}...`);
+  console.log(`[4/5] ripgrep ${RIPGREP_VERSION} 产物缓存未命中，开始准备...`);
 
   const archMap = {
     "darwin-arm64": "aarch64-apple-darwin",
@@ -381,21 +557,22 @@ async function installRipgrep() {
 
   const ext = targetPlatform === "win32" ? "zip" : "tar.gz";
   const filename = `ripgrep-${RIPGREP_VERSION}-${triple}.${ext}`;
-  const url = `https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${filename}`;
+  const ripgrepUrlCandidates = [
+    `https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${filename}`,
+    `https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${filename}`,
+  ];
 
-  const cachePath = path.join(CACHE_DIR, filename);
+  const cachePath = path.join(CACHE_DOWNLOADS_DIR, filename);
   if (!fs.existsSync(cachePath)) {
-    await download(url, cachePath);
+    console.log(`  下载缓存未命中: ${cachePath}`);
+    await downloadWithFallback(ripgrepUrlCandidates, cachePath);
   } else {
-    console.log(`  使用缓存: ${cachePath}`);
+    console.log(`  下载缓存命中: ${cachePath}`);
   }
 
-  if (fs.existsSync(toolsDir)) {
-    fs.rmSync(toolsDir, { recursive: true, force: true });
-  }
-  fs.mkdirSync(toolsDir, { recursive: true });
+  resetDir(artifactToolsDir);
 
-  const tmpDir = path.join(CACHE_DIR, "ripgrep-extract");
+  const tmpDir = path.join(CACHE_DIR, "tmp", `ripgrep-extract-${targetId}`);
   if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.mkdirSync(tmpDir, { recursive: true });
 
@@ -406,8 +583,7 @@ async function installRipgrep() {
   }
 
   // ripgrep 解压到带版本号的子目录
-  const rgBin = targetPlatform === "win32" ? "rg.exe" : "rg";
-  const rgDest = path.join(toolsDir, rgBin);
+  const rgDest = path.join(artifactToolsDir, rgBin);
 
   // 递归查找 rg 二进制
   function findFile(dir, name) {
@@ -428,12 +604,16 @@ async function installRipgrep() {
     fs.copyFileSync(rgSrc, rgDest);
     if (targetPlatform !== "win32") fs.chmodSync(rgDest, 0o755);
   } else {
-    console.warn(`  警告: 未找到 ${rgBin}`);
+    throw new Error(`未找到 ${rgBin}`);
   }
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (fs.existsSync(toolsDir)) {
+    fs.rmSync(toolsDir, { recursive: true, force: true });
+  }
+  copyDirAllSync(artifactToolsDir, toolsDir);
   writeStamp("ripgrep", RIPGREP_VERSION);
-  console.log(`  ripgrep ${RIPGREP_VERSION} 安装完成\n`);
+  console.log(`  ripgrep ${RIPGREP_VERSION} 准备完成\n`);
 }
 
 // ── Step 5: 构建并复制 hermes-web-ui ──
@@ -528,6 +708,7 @@ async function main() {
   await installNodejs();
   await installRipgrep();
   await copyWebUI();
+  writeRuntimeVersion();
 
   console.log("=== 资源打包完成 ===");
   console.log(`  输出: ${TARGET_DIR}\n`);
