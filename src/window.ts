@@ -30,16 +30,16 @@ export class WindowManager {
 
     if (this.win && !this.win.isDestroyed()) {
       log.info(`复用主窗口: id=${this.win.id}`);
-      const currentUrl = this.win.webContents.getURL();
-      if (!currentUrl.startsWith(targetUrl)) {
-        log.info(`窗口当前 URL 非 WebUI，重新加载: ${targetUrl}`);
-        try {
-          await this.win.loadURL(targetUrl);
-        } catch (err) {
-          log.error(`复用窗口加载 WebUI 失败: url=${targetUrl} err=${err}`);
-          await this.loadErrorPage();
-        }
-      }
+      // const currentUrl = this.win.webContents.getURL();
+      // if (!currentUrl.startsWith(targetUrl)) {
+      //   log.info(`窗口当前 URL 非 WebUI，重新加载: ${targetUrl}`);
+      //   try {
+      //     await this.win.loadURL(targetUrl);
+      //   } catch (err) {
+      //     log.error(`复用窗口加载 WebUI 失败: url=${targetUrl} err=${err}`);
+      //     await this.loadErrorPage();
+      //   }
+      // }
       this.win.show();
       this.win.focus();
       return;

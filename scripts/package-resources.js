@@ -292,6 +292,18 @@ function getDirSizeBytes(dir) {
   return total;
 }
 
+function getPathSizeBytes(p) {
+  let st;
+  try {
+    st = fs.statSync(p);
+  } catch {
+    return 0;
+  }
+  if (st.isFile()) return st.size;
+  if (st.isDirectory()) return getDirSizeBytes(p);
+  return 0;
+}
+
 function formatBytes(n) {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let v = n;
@@ -716,10 +728,10 @@ async function main() {
   // 列出目录大小
   for (const d of ["python.zip", "venv.zip", "runtime", "tools", "webui"]) {
     const p = path.join(TARGET_DIR, d);
-    if (fs.existsSync(p)) {
-      const size = getDirSizeBytes(p);
-      console.log(`  ${d}/: ${formatBytes(size)}`);
-    }
+    if (!fs.existsSync(p)) continue;
+    const size = getPathSizeBytes(p);
+    const suffix = fs.statSync(p).isDirectory() ? "/" : "";
+    console.log(`  ${d}${suffix}: ${formatBytes(size)}`);
   }
 }
 

@@ -139,8 +139,8 @@ export class TrayManager {
       { type: "separator" },
       { label: getStateLabel(state), enabled: false },
       { label: t.restartWebUI, enabled: !inTransition, click: onRestartWebUI },
-      { type: "separator" },
-      { label: t.checkUpdates, click: onCheckUpdates },
+      // { type: "separator" },
+      // { label: t.checkUpdates, click: onCheckUpdates },
       { type: "separator" },
       { label: t.quit, click: onQuit },
     ]);

@@ -35,10 +35,11 @@ dmg:
   writeUpdateInfo: false
   artifactName: "HermesDesktop-${version}-${arch}.${ext}"
 
-# --- Windows (Phase 2) ---
+# --- Windows ---
 win:
   target: nsis
   icon: assets/icon.ico
+  sign: null
 
 nsis:
   oneClick: false
